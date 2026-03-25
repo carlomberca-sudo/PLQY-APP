@@ -15,11 +15,4 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Optional password protection on Streamlit Cloud
-In Streamlit app settings, add a secret:
-
-```toml
-app_password = "SolarFoilB.V.AYCS"
-```
-
 If no secret is configured, the app will still run locally without a password.
