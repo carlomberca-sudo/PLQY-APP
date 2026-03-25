@@ -19,7 +19,7 @@ streamlit run app.py
 In Streamlit app settings, add a secret:
 
 ```toml
-app_password = "your-password-here"
+app_password = "SolarFoilB.V.AYCS"
 ```
 
 If no secret is configured, the app will still run locally without a password.
