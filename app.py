@@ -3,6 +3,7 @@ import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
 from pathlib import Path
+import re
 
 st.set_page_config(page_title="PLQY Analyzer", layout="wide")
 
@@ -56,7 +57,7 @@ def load_single_correction_curve(file_obj, wl_axis):
     cc_y = cc_y[mask] * 0.01  # % -> fraction
 
     if cc_y.size < 2:
-        raise ValueError("One correction curve file did not yield usable numeric data.")
+        raise ValueError("Correction curve file did not yield usable numeric data.")
 
     looks_like_wavelength = (
         (cc_x.min() > 100)
@@ -74,47 +75,6 @@ def load_single_correction_curve(file_obj, wl_axis):
     return cc_interp
 
 
-def load_and_average_correction_curves(uploaded_files, wl_axis):
-    if not uploaded_files:
-        return None, None
-
-    curves = []
-    names = []
-
-    for file_obj in uploaded_files:
-        try:
-            file_obj.seek(0)
-        except Exception:
-            pass
-        curves.append(load_single_correction_curve(file_obj, wl_axis))
-        names.append(getattr(file_obj, "name", "unknown_file"))
-
-    cc_avg = np.mean(np.vstack(curves), axis=0)
-    return cc_avg, names
-
-
-def list_default_correction_files():
-    if not DEFAULT_CC_DIR.exists():
-        return []
-    return sorted(
-        [p for p in DEFAULT_CC_DIR.iterdir() if p.suffix.lower() in {".csv", ".txt"}]
-    )
-
-
-def load_default_correction_set(wl_axis):
-    files = list_default_correction_files()
-    if not files:
-        return None, []
-
-    curves = []
-    for path in files:
-        with open(path, "rb") as f:
-            curves.append(load_single_correction_curve(f, wl_axis))
-
-    cc_avg = np.mean(np.vstack(curves), axis=0)
-    return cc_avg, [p.name for p in files]
-
-
 def build_wavelength_axis(channel, center_wavelength, grating_number):
     if grating_number == 1:
         g = 0.4196
@@ -124,7 +84,7 @@ def build_wavelength_axis(channel, center_wavelength, grating_number):
     return wl
 
 
-def compute_plqy(sample_i, ref_i, cc, wl, excitation_wavelength, integration_boundary):
+def compute_plqy(sample_i, ref_i, cc, wl, integration_boundary):
     dif = sample_i - ref_i
     dif_correct = dif * cc * wl
 
@@ -161,13 +121,73 @@ def results_dataframe(wl, sample_i, ref_i, dif, dif_correct):
     )
 
 
+def list_default_correction_files():
+    if not DEFAULT_CC_DIR.exists():
+        return []
+    return sorted([p for p in DEFAULT_CC_DIR.iterdir() if p.suffix.lower() in {".csv", ".txt"}])
+
+
+def correction_file_matches(name, grating_number, center_wavelength, filter_number):
+    """
+    Match names like:
+    CC_2022_UVVIS_G1_Cen550_f4.csv
+    """
+    name_lower = name.lower()
+    return (
+        f"g{grating_number}".lower() in name_lower
+        and f"cen{center_wavelength}".lower() in name_lower
+        and f"f{filter_number}".lower() in name_lower
+    )
+
+
+def select_uploaded_correction_file(uploaded_files, grating_number, center_wavelength, filter_number):
+    matches = []
+    for f in uploaded_files:
+        fname = getattr(f, "name", "")
+        if correction_file_matches(fname, grating_number, center_wavelength, filter_number):
+            matches.append(f)
+
+    if len(matches) == 0:
+        raise FileNotFoundError(
+            f"No uploaded correction curve matched G{grating_number}, Cen{center_wavelength}, f{filter_number}."
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"Multiple uploaded correction curves matched G{grating_number}, Cen{center_wavelength}, f{filter_number}: "
+            + ", ".join([m.name for m in matches])
+        )
+
+    return matches[0], matches[0].name
+
+
+def select_default_correction_file(grating_number, center_wavelength, filter_number):
+    files = list_default_correction_files()
+    matches = []
+
+    for path in files:
+        if correction_file_matches(path.name, grating_number, center_wavelength, filter_number):
+            matches.append(path)
+
+    if len(matches) == 0:
+        raise FileNotFoundError(
+            f"No default correction curve matched G{grating_number}, Cen{center_wavelength}, f{filter_number}."
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            f"Multiple default correction curves matched G{grating_number}, Cen{center_wavelength}, f{filter_number}: "
+            + ", ".join([m.name for m in matches])
+        )
+
+    return matches[0], matches[0].name
+
+
 # -----------------------------
 # UI
 # -----------------------------
 
 st.title("PLQY Analyzer")
 st.caption(
-    "Upload sample and reference files, then either upload 7 correction curves or use the default set stored in the app."
+    "Upload sample and reference files. Then the app selects the correct correction curve based on grating, center wavelength, and filter."
 )
 
 left, right = st.columns([1, 1.5], gap="large")
@@ -184,15 +204,15 @@ with left:
 
     cc_source = st.radio(
         "3. Correction curves source",
-        options=["Upload 7 files now", "Use default files stored in app"],
+        options=["Upload correction files now", "Use default files stored in app"],
     )
 
     cc_files = []
     cc_names_preview = []
 
-    if cc_source == "Upload 7 files now":
+    if cc_source == "Upload correction files now":
         cc_files = st.file_uploader(
-            "Drop the 7 correction curve files",
+            "Drop correction curve files",
             type=["csv", "txt"],
             accept_multiple_files=True,
             key="cc_multi",
@@ -224,11 +244,12 @@ with left:
         step=1,
     )
 
-    grating_number = st.selectbox("Grating", options=[1, 2], index=0)
+    grating_number = st.selectbox("6. Grating", options=[1, 2], index=0)
+    filter_number = st.selectbox("7. Filter", options=[1, 2, 3, 4], index=3)
 
     default_boundary = excitation_wavelength + 50
     integration_boundary = st.number_input(
-        "6. Integration boundary (nm)",
+        "8. Integration boundary (nm)",
         min_value=200.0,
         max_value=1200.0,
         value=float(default_boundary),
@@ -248,133 +269,150 @@ with right:
 
             if sample_channel is None or ref_channel is None:
                 st.error("Please upload sample and reference files.")
-            elif len(sample_channel) != len(ref_channel):
+                st.stop()
+
+            if len(sample_channel) != len(ref_channel):
                 st.error("Sample and reference files do not have the same number of points.")
+                st.stop()
+
+            wl = build_wavelength_axis(sample_channel, center_wavelength, grating_number)
+
+            if cc_source == "Upload correction files now":
+                if not cc_files:
+                    st.error("Please upload the correction curve files.")
+                    st.stop()
+
+                selected_cc_file, selected_cc_name = select_uploaded_correction_file(
+                    cc_files,
+                    grating_number=grating_number,
+                    center_wavelength=center_wavelength,
+                    filter_number=filter_number,
+                )
+                try:
+                    selected_cc_file.seek(0)
+                except Exception:
+                    pass
+                cc = load_single_correction_curve(selected_cc_file, wl)
+
             else:
-                wl = build_wavelength_axis(sample_channel, center_wavelength, grating_number)
-
-                if cc_source == "Upload 7 files now":
-                    if len(cc_files) != 7:
-                        st.error("Please upload exactly 7 correction curve files.")
-                        st.stop()
-                    cc, cc_names = load_and_average_correction_curves(cc_files, wl)
-                else:
-                    cc, cc_names = load_default_correction_set(wl)
-                    if cc is None:
-                        st.error(
-                            "No default correction curve files were found in the correction_curves folder."
-                        )
-                        st.stop()
-
-                res = compute_plqy(
-                    sample_i=sample_i,
-                    ref_i=ref_i,
-                    cc=cc,
-                    wl=wl,
-                    excitation_wavelength=excitation_wavelength,
-                    integration_boundary=integration_boundary,
+                selected_cc_path, selected_cc_name = select_default_correction_file(
+                    grating_number=grating_number,
+                    center_wavelength=center_wavelength,
+                    filter_number=filter_number,
                 )
-                df = results_dataframe(wl, sample_i, ref_i, res["dif"], res["dif_correct"])
+                with open(selected_cc_path, "rb") as f:
+                    cc = load_single_correction_curve(f, wl)
 
-                tab1, tab2, tab3 = st.tabs(
-                    [
-                        "PLQY value",
-                        "Raw + processed graphs",
-                        "Processed data + integration",
-                    ]
+            res = compute_plqy(
+                sample_i=sample_i,
+                ref_i=ref_i,
+                cc=cc,
+                wl=wl,
+                integration_boundary=integration_boundary,
+            )
+            df = results_dataframe(wl, sample_i, ref_i, res["dif"], res["dif_correct"])
+
+            tab1, tab2, tab3 = st.tabs(
+                [
+                    "PLQY value",
+                    "Raw + processed graphs",
+                    "Processed data + integration",
+                ]
+            )
+
+            with tab1:
+                c1, c2, c3 = st.columns(3)
+                c1.metric("PLQY (%)", f"{res['plqy']:.2f}")
+                c2.metric("Emission area", f"{res['area_em']:.4g}")
+                c3.metric("Absorption area", f"{res['area_abs']:.4g}")
+                st.dataframe(
+                    pd.DataFrame(
+                        {
+                            "Parameter": [
+                                "Center wavelength (nm)",
+                                "Excitation wavelength (nm)",
+                                "Integration boundary (nm)",
+                                "Grating",
+                                "Filter",
+                                "Correction file used",
+                            ],
+                            "Value": [
+                                center_wavelength,
+                                excitation_wavelength,
+                                res["integration_boundary"],
+                                grating_number,
+                                filter_number,
+                                selected_cc_name,
+                            ],
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
                 )
 
-                with tab1:
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("PLQY (%)", f"{res['plqy']:.2f}")
-                    c2.metric("Emission area", f"{res['area_em']:.4g}")
-                    c3.metric("Absorption area", f"{res['area_abs']:.4g}")
-                    st.dataframe(
-                        pd.DataFrame(
-                            {
-                                "Parameter": [
-                                    "Center wavelength (nm)",
-                                    "Excitation wavelength (nm)",
-                                    "Integration boundary (nm)",
-                                    "Grating",
-                                    "Correction files used",
-                                ],
-                                "Value": [
-                                    center_wavelength,
-                                    excitation_wavelength,
-                                    res["integration_boundary"],
-                                    grating_number,
-                                    ", ".join(cc_names),
-                                ],
-                            }
-                        ),
-                        use_container_width=True,
-                        hide_index=True,
-                    )
+            with tab2:
+                fig1, ax1 = plt.subplots(figsize=(8, 4.5))
+                ax1.plot(wl, sample_i, label="sample")
+                ax1.plot(wl, ref_i, label="reference")
+                ax1.set_title("Raw spectra")
+                ax1.set_xlabel("Wavelength (nm)")
+                ax1.set_ylabel("Intensity")
+                ax1.grid(True)
+                ax1.legend()
+                st.pyplot(fig1)
 
-                with tab2:
-                    fig1, ax1 = plt.subplots(figsize=(8, 4.5))
-                    ax1.plot(wl, sample_i, label="sample")
-                    ax1.plot(wl, ref_i, label="reference")
-                    ax1.set_title("Raw spectra")
-                    ax1.set_xlabel("Wavelength (nm)")
-                    ax1.set_ylabel("Intensity")
-                    ax1.grid(True)
-                    ax1.legend()
-                    st.pyplot(fig1)
+                fig2, ax2 = plt.subplots(figsize=(8, 4.5))
+                ax2.plot(wl, res["dif"], label="uncorrected")
+                ax2.plot(wl, res["dif_correct"], label="corrected")
+                ax2.axvline(
+                    res["integration_boundary"],
+                    linestyle="--",
+                    label="integration boundary",
+                )
+                ax2.set_title("Processed spectra")
+                ax2.set_xlabel("Wavelength (nm)")
+                ax2.set_ylabel("Signal")
+                ax2.grid(True)
+                ax2.legend()
+                st.pyplot(fig2)
 
-                    fig2, ax2 = plt.subplots(figsize=(8, 4.5))
-                    ax2.plot(wl, res["dif"], label="uncorrected")
-                    ax2.plot(wl, res["dif_correct"], label="corrected")
-                    ax2.axvline(
-                        res["integration_boundary"],
-                        linestyle="--",
-                        label="integration boundary",
-                    )
-                    ax2.set_title("Processed spectra")
-                    ax2.set_xlabel("Wavelength (nm)")
-                    ax2.set_ylabel("Signal")
-                    ax2.grid(True)
-                    ax2.legend()
-                    st.pyplot(fig2)
+            with tab3:
+                fig3, ax3 = plt.subplots(figsize=(8, 5))
+                ax3.plot(wl, res["dif_correct"], label="corrected")
+                ax3.axvline(
+                    res["integration_boundary"], linestyle="--", label="boundary"
+                )
+                ax3.fill_between(
+                    wl[: res["integration_index"]],
+                    res["dif_correct"][: res["integration_index"]],
+                    alpha=0.3,
+                    label="emission area",
+                )
+                ax3.fill_between(
+                    wl[res["integration_index"] :],
+                    res["dif_correct"][res["integration_index"] :],
+                    alpha=0.3,
+                    label="absorption area",
+                )
+                ax3.set_title("Corrected data with integration split")
+                ax3.set_xlabel("Wavelength (nm)")
+                ax3.set_ylabel("Corrected signal")
+                ax3.grid(True)
+                ax3.legend()
+                st.pyplot(fig3)
 
-                with tab3:
-                    fig3, ax3 = plt.subplots(figsize=(8, 5))
-                    ax3.plot(wl, res["dif_correct"], label="corrected")
-                    ax3.axvline(
-                        res["integration_boundary"], linestyle="--", label="boundary"
-                    )
-                    ax3.fill_between(
-                        wl[: res["integration_index"]],
-                        res["dif_correct"][: res["integration_index"]],
-                        alpha=0.3,
-                        label="emission area",
-                    )
-                    ax3.fill_between(
-                        wl[res["integration_index"] :],
-                        res["dif_correct"][res["integration_index"] :],
-                        alpha=0.3,
-                        label="absorption area",
-                    )
-                    ax3.set_title("Corrected data with integration split")
-                    ax3.set_xlabel("Wavelength (nm)")
-                    ax3.set_ylabel("Corrected signal")
-                    ax3.grid(True)
-                    ax3.legend()
-                    st.pyplot(fig3)
+                st.dataframe(df, use_container_width=True)
+                st.write("Correction file used:")
+                st.write(selected_cc_name)
 
-                    st.dataframe(df, use_container_width=True)
-                    st.write("Correction files used:")
-                    st.write(cc_names)
-
-                    csv_bytes = df.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        "Download processed data (CSV)",
-                        data=csv_bytes,
-                        file_name="plqy_processed_data.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                    )
+                csv_bytes = df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Download processed data (CSV)",
+                    data=csv_bytes,
+                    file_name="plqy_processed_data.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
         except Exception as e:
             st.error(f"Error while processing files: {e}")
