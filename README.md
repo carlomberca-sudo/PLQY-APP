@@ -1,6 +1,6 @@
 # PLQY Streamlit App
 
-A private Streamlit app for PLQY analysis.
+A Streamlit app for PLQY analysis.
 
 ## Files
 - `app.py` - main app
